@@ -452,7 +452,7 @@ seaf_repo_manager_get_repo (SeafRepoManager *manager, const gchar *id)
     int len = strlen(id);
     gboolean db_err = FALSE;
 
-    if (len >= 37)
+    if (len > 37)
         return NULL;
 
     if (repo_exists_in_db (manager->seaf->db, id, &db_err)) {
@@ -504,9 +504,30 @@ save_branch_repo_map (SeafRepoManager *manager, SeafBranch *branch)
 {
     char sql[256];
 
-    snprintf (sql, sizeof(sql), "REPLACE INTO RepoHead VALUES ('%s', '%s')",
-              branch->repo_id, branch->name);
-    return seaf_db_query (seaf->db, sql);
+    if (seaf_db_type(seaf->db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf (sql, sizeof(sql),
+                  "SELECT repo_id FROM RepoHead WHERE repo_id='%s'",
+                  branch->repo_id);
+        if (seaf_db_check_for_existence (seaf->db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE RepoHead SET branch_name='%s' "
+                     "WHERE repo_id='%s'",
+                     branch->repo_id, branch->name);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO RepoHEAD VALUES ('%s', '%s')",
+                     branch->repo_id, branch->name);
+        if (err)
+            return -1;
+        return seaf_db_query(seaf->db, sql);
+    } else {
+        snprintf (sql, sizeof(sql), "REPLACE INTO RepoHead VALUES ('%s', '%s')",
+                  branch->repo_id, branch->name);
+        return seaf_db_query (seaf->db, sql);
+    }
+
+    return -1;
 }
 
 int
@@ -855,6 +876,97 @@ create_tables_sqlite (SeafRepoManager *mgr)
     return 0;
 }
 
+static int
+create_tables_pgsql (SeafRepoManager *mgr)
+{
+    SeafDB *db = mgr->seaf->db;
+    char *sql;
+
+    sql = "CREATE TABLE IF NOT EXISTS Repo (repo_id CHAR(37) PRIMARY KEY)";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoOwner ("
+        "repo_id CHAR(37) PRIMARY KEY, "
+        "owner_id VARCHAR(255))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoGroup (repo_id CHAR(37), "
+        "group_id INTEGER, user_name VARCHAR(255), permission CHAR(15), "
+        "UNIQUE (group_id, repo_id))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    if (!mgr->seaf->cloud_mode) {
+        sql = "CREATE TABLE IF NOT EXISTS InnerPubRepo ("
+            "repo_id CHAR(37) PRIMARY KEY,"
+            "permission CHAR(15))";
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    }
+
+    if (mgr->seaf->cloud_mode) {
+        sql = "CREATE TABLE IF NOT EXISTS OrgRepo (org_id INTEGER, "
+            "repo_id CHAR(37), "
+            "user VARCHAR(255), "
+            "UNIQUE (repo_id)";
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+
+        sql = "CREATE TABLE IF NOT EXISTS OrgGroupRepo ("
+            "org_id INTEGER, repo_id CHAR(37), "
+            "group_id INTEGER, owner VARCHAR(255), permission CHAR(15), "
+            "UNIQUE (org_id, group_id, repo_id)";
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+
+        sql = "CREATE TABLE IF NOT EXISTS OrgInnerPubRepo ("
+            "org_id INTEGER, repo_id CHAR(37),"
+            "PRIMARY KEY (org_id, repo_id), "
+            "permission CHAR(15))";
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    }
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoUserToken ("
+        "repo_id CHAR(37), "
+        "email VARCHAR(255), "
+        "token CHAR(41), "
+        "UNIQUE (repo_id, token))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoHead ("
+        "repo_id CHAR(37) PRIMARY KEY, branch_name VARCHAR(10))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoSize ("
+        "repo_id CHAR(37) PRIMARY KEY,"
+        "size NUMERIC(20),"
+        "head_id CHAR(41))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoHistoryLimit ("
+        "repo_id CHAR(37) PRIMARY KEY, days INTEGER)";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS RepoValidSince ("
+        "repo_id CHAR(37) PRIMARY KEY, timestamp BIGINT)";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    sql = "CREATE TABLE IF NOT EXISTS WebAP (repo_id CHAR(37) PRIMARY KEY, "
+        "access_property CHAR(10))";
+    if (seaf_db_query (db, sql) < 0)
+        return -1;
+
+    return 0;
+}
+
 static int 
 create_db_tables_if_not_exist (SeafRepoManager *mgr)
 {
@@ -865,6 +977,8 @@ create_db_tables_if_not_exist (SeafRepoManager *mgr)
         return create_tables_mysql (mgr);
     else if (db_type == SEAF_DB_TYPE_SQLITE)
         return create_tables_sqlite (mgr);
+    else if (db_type == SEAF_DB_TYPE_PGSQL)
+        return create_tables_pgsql (mgr);
 
     g_assert (0);
     return -1;
@@ -899,16 +1013,39 @@ seaf_repo_manager_set_repo_token (SeafRepoManager *mgr,
                                   const char *email,
                                   const char *token)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[512];
 
-    snprintf (sql, sizeof(sql),
-              "REPLACE INTO RepoUserToken VALUES ('%s', '%s', '%s')",
-              repo_id, email, token);
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf(sql, sizeof(sql),
+                 "SELECT repo_id FROM RepoUserToken WHERE "
+                 "repo_id='%s' AND email='%s' AND TOKEN='%s'",
+                 repo_id, email, token);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE RepoUserToken SET repo_id='%s', "
+                     "email='%s', token='%s' WHERE "
+                     "repo_id='%s' AND token='%s'",
+                     repo_id, email, token, repo_id, token);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO RepoUserToken VALUES "
+                     "('%s', '%s', '%s')",
+                     repo_id, email, token);
+        if (err)
+            return -1;
+        return seaf_db_query(db, sql);
+    } else {
+        snprintf (sql, sizeof(sql),
+                  "REPLACE INTO RepoUserToken VALUES ('%s', '%s', '%s')",
+                  repo_id, email, token);
 
-    if (seaf_db_query (mgr->seaf->db, sql) < 0) {
-        seaf_warning ("failed to set repo token. repo = %s, email = %s\n",
-                      repo_id, email);
-        return -1;
+        if (seaf_db_query (db, sql) < 0) {
+            seaf_warning ("failed to set repo token. repo = %s, email = %s\n",
+                          repo_id, email);
+            return -1;
+        }
     }
 
     return 0;
@@ -1051,13 +1188,32 @@ seaf_repo_manager_set_repo_history_limit (SeafRepoManager *mgr,
                                           const char *repo_id,
                                           int days)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[256];
 
-    snprintf (sql, sizeof(sql),
-              "REPLACE INTO RepoHistoryLimit VALUES ('%s', %d)",
-              repo_id, days);
-    if (seaf_db_query (mgr->seaf->db, sql) < 0)
-        return -1;
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf(sql, sizeof(sql),
+                 "SELECT repo_id FROM RepoHistoryLimit "
+                 "WHERE repo_id='%s'", repo_id);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE RepoHistoryLimit SET "
+                     "days='%d'", days);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO RepoHistoryLimit VALUES "
+                     "('%s', '%d')", repo_id, days);
+        if (err)
+            return -1;
+        return seaf_db_query(db, sql);
+    } else {
+        snprintf (sql, sizeof(sql),
+                  "REPLACE INTO RepoHistoryLimit VALUES ('%s', %d)",
+                  repo_id, days);
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    }
 
     return 0;
 }
@@ -1086,13 +1242,33 @@ seaf_repo_manager_set_repo_valid_since (SeafRepoManager *mgr,
                                         const char *repo_id,
                                         gint64 timestamp)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[256];
 
-    snprintf (sql, sizeof(sql),
-              "REPLACE INTO RepoValidSince VALUES ('%s', %lld)",
-              repo_id, timestamp);
-    if (seaf_db_query (mgr->seaf->db, sql) < 0)
-        return -1;
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf(sql, sizeof(sql),
+                 "SELECT repo_id FROM RepoValidSince WHERE "
+                 "repo_id='%s'", repo_id);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE RepoValidSince SET "
+                     "timestamp='%lld'", timestamp);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO RepoValidSince VALUES "
+                     "('%s', '%lld'))", repo_id, timestamp);
+        if (err)
+            return -1;
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    } else {
+        snprintf (sql, sizeof(sql),
+                  "REPLACE INTO RepoValidSince VALUES ('%s', %lld)",
+                  repo_id, timestamp);
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    }
 
     return 0;
 }
@@ -1140,12 +1316,31 @@ seaf_repo_manager_set_repo_owner (SeafRepoManager *mgr,
                                   const char *repo_id,
                                   const char *email)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[256];
 
-    snprintf (sql, sizeof(sql), "REPLACE INTO RepoOwner VALUES ('%s', '%s')",
-              repo_id, email);
-    if (seaf_db_query (mgr->seaf->db, sql) < 0)
-        return -1;
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf(sql, sizeof(sql),
+                 "SELECT repo_id FROM RepoOwner WHERE repo_id='%s'", repo_id);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE RepoOwner SET owner_id='%s' WHERE "
+                     "repo_id='%s'", email);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO RepoOwner VALUES ('%s', '%s')",
+                     repo_id, email);
+        if (err)
+            return -1;
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    } else {
+        snprintf (sql, sizeof(sql), "REPLACE INTO RepoOwner VALUES ('%s', '%s')",
+                  repo_id, email);
+        if (seaf_db_query (db, sql) < 0)
+            return -1;
+    }
 
     return 0;
 }
@@ -1593,12 +1788,33 @@ seaf_repo_manager_set_inner_pub_repo (SeafRepoManager *mgr,
                                       const char *repo_id,
                                       const char *permission)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[256];
 
-    snprintf (sql, sizeof(sql),
-              "REPLACE INTO InnerPubRepo VALUES ('%s', '%s')",
-              repo_id, permission);
-    return seaf_db_query (mgr->seaf->db, sql);
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf(sql, sizeof(sql),
+                 "SELECT repo_id FROM InnerPubRepo WHERE repo_id='%s'",
+                 repo_id);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE InnerPubRepo SET permission='%s' "
+                     "WHERE repo_id='%s'", permission, repo_id);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO InnerPubRepo VALUES "
+                     "('%s', '%s')", repo_id, permission);
+        if (err)
+            return -1;
+        return seaf_db_query (db, sql);
+    } else {
+        snprintf (sql, sizeof(sql),
+                  "REPLACE INTO InnerPubRepo VALUES ('%s', '%s')",
+                  repo_id, permission);
+        return seaf_db_query (db, sql);
+    }
+
+    return -1;
 }
 
 int
@@ -2010,12 +2226,33 @@ seaf_repo_manager_set_org_inner_pub_repo (SeafRepoManager *mgr,
                                           const char *repo_id,
                                           const char *permission)
 {
+    SeafDB *db = mgr->seaf->db;
     char sql[256];
 
-    snprintf (sql, sizeof(sql),
-              "REPLACE INTO OrgInnerPubRepo VALUES (%d, '%s', '%s')",
-              org_id, repo_id, permission);
-    return seaf_db_query (mgr->seaf->db, sql);
+    if (seaf_db_type(db) == SEAF_DB_TYPE_PGSQL) {
+        gboolean err;
+        snprintf (sql, sizeof(sql),
+                  "SELECT repo_id FROM OrgInnerPubRepo WHERE "
+                  "org_id='%d' AND repo_id='%s'", org_id, repo_id);
+        if (seaf_db_check_for_existence(db, sql, &err))
+            snprintf(sql, sizeof(sql),
+                     "UPDATE OrgInnerPubRepo SET permission='%s' WHERE"
+                     "org_id='%d' AND repo_id='%s'", permission, org_id, repo_id);
+        else
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO OrgIneerPubRepo VALUES "
+                     "('%d', '%s', '%s')", org_id, repo_id, permission);
+        if (err)
+            return -1;
+        return seaf_db_query (db, sql);
+    } else {
+        snprintf (sql, sizeof(sql),
+                  "REPLACE INTO OrgInnerPubRepo VALUES (%d, '%s', '%s')",
+                  org_id, repo_id, permission);
+        return seaf_db_query (db, sql);
+    }
+
+    return -1;
 }
 
 int

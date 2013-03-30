@@ -4,6 +4,7 @@
 enum {
     SEAF_DB_TYPE_SQLITE,
     SEAF_DB_TYPE_MYSQL,
+    SEAF_DB_TYPE_PGSQL,
 };
 
 typedef struct SeafDB SeafDB;

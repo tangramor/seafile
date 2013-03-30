@@ -67,6 +67,8 @@ if test "$bwin32" = true; then
    compile_tools=no
    compile_server=no
    compile_httpserver=no
+   compile_mysql=no
+   compile_pgsql=no
 fi
 
 if test "$bmac" = true; then
@@ -76,6 +78,8 @@ if test "$bmac" = true; then
    compile_tools=no
    compile_server=no
    compile_httpserver=no
+   compile_mysql=no
+   compile_pgsql=no
 
    AC_ARG_ENABLE(server, AC_HELP_STRING([--enable-server], [enable server]),
       [compile_server=$enableval],[compile_server="no"])
@@ -83,6 +87,11 @@ if test "$bmac" = true; then
    AC_ARG_ENABLE(httpserver, AC_HELP_STRING([--enable-httpserver], [enable httpserver]),
      [compile_httpserver=$enableval],[compile_httpserver="no"])
 
+   AC_ARG_ENABLE(mysql, AC_HELP_STRING([--enable-mysql], [enable mysql]),
+      [compile_mysql=$enableval],[compile_mysql="no"])
+
+   AC_ARG_ENABLE(pgsql, AC_HELP_STRING([--enable-pgsql], [enable postgresql]),
+      [compile_pgsql=$enableval],[compile_pgsql="no"])
 fi
 
 if test "$blinux" = true; then
@@ -91,7 +100,8 @@ if test "$blinux" = true; then
 
    compile_server=no
    compile_httpserver=no
-
+   compile_mysql=no
+   compile_pgsql=no
 
    AC_ARG_ENABLE(client, AC_HELP_STRING([--enable-client], [enable client]),
       [compile_client=$enableval],[compile_client="yes"])
@@ -115,6 +125,11 @@ if test "$blinux" = true; then
    AC_ARG_ENABLE(ceph, AC_HELP_STRING([--enable-ceph], [enable ceph backend]),
       [compile_ceph=$enableval],[compile_ceph="no"])
 
+   AC_ARG_ENABLE(mysql, AC_HELP_STRING([--enable-mysql], [enable mysql]),
+      [compile_mysql=$enableval],[compile_mysql="no"])
+
+   AC_ARG_ENABLE(pgsql, AC_HELP_STRING([--enable-pgsql], [enable postgresql]),
+      [compile_pgsql=$enableval],[compile_pgsql="no"])
 fi
 
 AC_ARG_ENABLE(python,
@@ -166,6 +181,8 @@ AM_CONDITIONAL([COMPILE_HTTPSERVER], [test "${compile_httpserver}" = "yes"])
 #AM_CONDITIONAL([COMPILE_SEABLOCK], [test "${compile_seablock}" = "yes"])
 AM_CONDITIONAL([COMPILE_RIAK], [test "${compile_riak}" = "yes"])
 AM_CONDITIONAL([COMPILE_CEPH], [test "${compile_ceph}" = "yes"])
+AM_CONDITIONAL([COMPILE_MYSQL], [test "${compile_mysql}" = "yes"])
+AM_CONDITIONAL([COMPILE_PGSQL], [test "${compile_pgsql}" = "yes"])
 
 AM_CONDITIONAL([WIN32], [test "$bwin32" = "true"])
 AM_CONDITIONAL([MACOS], [test "$bmac" = "true"])
@@ -356,31 +373,52 @@ if test x${compile_python} = xyes; then
 fi
 
 
-# Check mysql client library and libzdb if compile seafile server
+# Check libzdb if compile seafile server
 if test "${compile_server}" = "yes"; then
    PKG_CHECK_MODULES(ZDB, [zdb >= $ZDB_REQUIRED])
    AC_SUBST(ZDB_CFLAGS)
    AC_SUBST(ZDB_LIBS)
+fi
 
-   MYSQL_CFLAGS=$(mysql_config --include)
-   MYSQL_LIBS=$(mysql_config --libs_r)
+# check postgresql if compile_pgsql is set
+if test "${compile_pgsql}" = "yes"; then
+  saved_CPPFLAGS=$CPPFLAGS
+  saved_LDFLAGS=$LDFLAGS
+  PGSQL_CFLAGS="-I`pg_config --includedir` $CPPFLAGS"
+  PGSQL_LIBS="-L`pg_config --libdir` $LDFLAGS"
 
-   # On CentOS, libmysqlclient is in /usr/lib64/mysql/, not /usr/lib, so we
-   # need to adjust CPPFLAGS and LDFLAGS before check it
-   saved_CPPFLAGS=$CPPFLAGS
-   saved_LDFLAGS=$LDFLAGS
-   CPPFLAGS="$MYSQL_CFLAGS $CPPFLAGS"
-   LDFLAGS="$MYSQL_LIBS $LDFLAGS"
+  CPPFLAGS="$PGSQL_CFLAGS $CPPFLAGS"
+  LDFLAGS="$PGSQL_LIBS $LDFLAGS"
 
-   AC_CHECK_LIB(mysqlclient, mysql_init, [echo "found library mysqlclient"],
-      AC_MSG_ERROR([*** Unable to find mysql client library]), )
+  AC_CHECK_HEADERS([libpq-fe.h], [], [compile_pgsql="no"])
 
-   CPPFLAGS=$saved_CPPFLAGS
-   LDFLAGS=$saved_LDFLAGS
+  CPPFLAGS=$saved_CPPFLAGS
+  LDFLAGS=$saved_LDFLAGS
 
-   AC_SUBST(MYSQL_LIBS)
-   AC_SUBST(MYSQL_CFLAGS)
+  AC_SUBST(PGSQL_LIBS)
+  AC_SUBST(PGSQL_CFLAGS)
+fi
 
+# check mysql if compile_mysql is set
+if test "${compile_mysql}" = "yes"; then
+  MYSQL_CFLAGS=$(mysql_config --include)
+  MYSQL_LIBS=$(mysql_config --libs_r)
+
+  # On CentOS, libmysqlclient is in /usr/lib64/mysql/, not /usr/lib, so we
+  # need to adjust CPPFLAGS and LDFLAGS before check it
+  saved_CPPFLAGS=$CPPFLAGS
+  saved_LDFLAGS=$LDFLAGS
+  CPPFLAGS="$MYSQL_CFLAGS $CPPFLAGS"
+  LDFLAGS="$MYSQL_LIBS $LDFLAGS"
+
+  AC_CHECK_LIB(mysqlclient, mysql_init, [echo "found library mysqlclient"],
+     AC_MSG_ERROR([*** Unable to find mysql client library]), )
+
+  CPPFLAGS=$saved_CPPFLAGS
+  LDFLAGS=$saved_LDFLAGS
+
+  AC_SUBST(MYSQL_LIBS)
+  AC_SUBST(MYSQL_CFLAGS)
 fi
 
 if test x${compile_httpserver} = xyes; then
@@ -469,5 +507,13 @@ fi
 #if test x${compile_cluster} = xyes; then
 #   echo    "cluster"
 #fi
+
+if test x${compile_mysql} = xyes; then
+   echo     "mysql"
+fi
+
+if test x${compile_pgsql} = xyes; then
+   echo     "pgsql"
+fi
 
 echo
