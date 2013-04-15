@@ -558,7 +558,7 @@ update_api_cb(evhtp_request_t *req, void *arg)
             error_code = ERROR_NOT_EXIST;
         }
         if (error->message)
-            printf ("%s\n", error->message);
+            seaf_warning ("%s\n", error->message);
         g_clear_error (&error);
         goto error;
     }
@@ -566,6 +566,7 @@ update_api_cb(evhtp_request_t *req, void *arg)
     ccnet_rpc_client_free (rpc_client);
     /* Send back the new file id, so that the mobile client can update local cache */
     evbuffer_add(req->buffer_out, new_file_id, strlen(new_file_id));
+    seaf_debug ("send back file id: %s\n", new_file_id);
     evhtp_send_reply (req, EVHTP_RES_OK);
 
     g_free (new_file_id);
